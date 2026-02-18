@@ -1,60 +1,63 @@
 flowchart TB
+  %% GitHub Mermaid parser is strict about unquoted punctuation in labels.
+  %% Use quoted labels and \n for line breaks (avoid <br/>).
+
   %% ============ Client ============
-  subgraph Client[Browser]
-    subgraph Web[Web App (React + Vite + TS)]
-      Routes[Routes<br/>/edit/:id<br/>/d/:id]
-      Chat[ChatPanel<br/>message stream]
-      Canvas[CanvasGrid<br/>react-grid-layout]
-      Cards[CardRenderer<br/>CardFrame]
-      Vega[VegaChart<br/>vega-embed]
-      RQ[Server Cache<br/>@tanstack/react-query]
-      Store[Client Store<br/>zustand<br/>spec + history + runtime]
-      Theme[Theme System<br/>CSS vars + vega config]
+  subgraph Client["Browser"]
+    subgraph Web["Web App: React + Vite + TS"]
+      Routes["Routes\n/edit/:id\n/d/:id"]
+      Chat["ChatPanel\nmessage stream"]
+      Canvas["CanvasGrid\nreact-grid-layout"]
+      Cards["CardRenderer\nCardFrame"]
+      Vega["VegaChart\nvega-embed"]
+      RQ["React Query\nserver cache"]
+      Store["zustand\nspec + history + runtime"]
+      Theme["Theme system\nCSS vars + Vega config"]
     end
   end
 
   %% ============ API ============
-  subgraph Server[API Service (Node)]
-    Router[HTTP Router]
-    Auth[Auth & Share Token<br/>hash verify]
-    Rate[Rate Limit<br/>ip+dashboardId]
-    Obs[Observability<br/>logs+metrics+traces]
+  subgraph Server["API Service: Node"]
+    Router["HTTP router"]
+    Auth["Auth + share token\nhash verify"]
+    Rate["Rate limit\nip + dashboardId"]
+    Obs["Observability\nlogs + metrics + traces"]
 
-    subgraph Agent[Agent Orchestrator]
-      Prompt[Prompt Builder<br/>intent + currentSpec + schema digest]
-      Tools[Skills/Tools Registry<br/>zod IO contracts]
-      Validate[Validate & Repair Loop<br/>zod + invariants]
-      Patch[JSON Patch Output<br/>RFC6902]
+    subgraph Agent["Agent orchestrator"]
+      Prompt["Prompt builder\nintent + currentSpec + schema digest"]
+      Tools["Skills/Tools registry\nzod IO contracts"]
+      Validate["Validate + repair loop\nzod + invariants"]
+      Patch["JSON Patch output\nRFC6902"]
     end
 
-    subgraph Connectors[Connectors]
-      SFConn[Salesforce Connector<br/>jsforce]
-      OASConn[REST/GraphQL Connector<br/>OpenAPI/Schema]
+    subgraph Connectors["Connectors"]
+      SFConn["Salesforce connector\njsforce"]
+      OASConn["REST/GraphQL connector\nOpenAPI/Schema"]
     end
 
-    subgraph Query[Query Layer]
-      Model[Data Model Cache<br/>describe/schema projection]
-      DSL[Query DSL<br/>typed + guarded]
-      Compile[Compiler<br/>DSL -> SOQL/HTTP]
-      Guard[Guardrails<br/>field allowlist<br/>func allowlist<br/>limit/timeout]
+    subgraph Query["Query layer"]
+      Model["Data model cache\ndescribe/schema projection"]
+      DSL["Query DSL\ntyped + guarded"]
+      Guard["Guardrails\nallowlists + limits"]
+      Compile["Compiler\nDSL -> SOQL/HTTP"]
     end
 
-    StoreSvc[Dashboard Service<br/>spec CRUD]
-    DataSvc[Data Service<br/>execute DataRequest]
+    StoreSvc["Dashboard service\nspec CRUD"]
+    DataSvc["Data service\nexecute DataRequest"]
   end
 
   %% ============ Storage ============
-  subgraph Storage[Storage]
-    DB[(DB: dashboards/connectors<br/>SQLite or Postgres)]
-    KV[(Cache: schema/rows<br/>optional)]
-    Secrets[[Secrets<br/>clientId/secret<br/>encryption key]]
+  subgraph Storage["Storage"]
+    DB["DB\ndashboards + connectors\nSQLite or Postgres"]
+    KV["Cache\nschema/rows optional"]
+    Secrets["Secrets\nOAuth client + encryption key"]
   end
 
   %% ============ External ============
-  subgraph External[External Systems]
-    LLM[LLM Provider<br/>tool calling]
-    Salesforce[Salesforce Cloud]
-    APIs[Other APIs<br/>REST/GraphQL]
+  subgraph External["External systems"]
+    LLM["LLM provider\ntool calling"]
+    Salesforce["Salesforce cloud"]
+    APIs["Other APIs\nREST/GraphQL"]
   end
 
   %% ============ Client flows ============
@@ -68,39 +71,28 @@ flowchart TB
   RQ --> Cards
 
   %% ============ Client <-> Server ============
-  Chat -->|POST /api/agent<br/>message + currentSpec| Router
-  Routes -->|GET /api/dashboards/:id?token=...| Router
-  Cards -->|GET /api/dashboards/:id/data<br/>requestId + runtime overlay| Router
+  Chat -->|POST /api/agent: message + currentSpec| Router
+  Routes -->|GET /api/dashboards/:id token| Router
+  Cards -->|GET /api/dashboards/:id/data: requestId + runtime| Router
 
   %% ============ Server request routing ============
-  Router --> Rate
-  Rate --> Auth
+  Router --> Rate --> Auth
+  Router --> Obs
   Auth --> StoreSvc
   Auth --> DataSvc
   Auth --> Agent
-  Router --> Obs
 
   %% ============ Agent orchestration ============
-  Agent --> Prompt
-  Prompt -->|tool calls| Tools
-  Tools --> Validate
-  Validate --> Patch
-  Agent -->|call| LLM
-  LLM -->|JSON: patch + dirtyAreas| Agent
+  Agent --> Prompt --> Tools --> Validate --> Patch
   Patch -->|response| Router
+  Agent -->|call| LLM
+  LLM -->|JSON patch + dirtyAreas| Agent
 
   %% ============ Data execution ============
-  DataSvc --> Model
-  Model --> DB
-  DataSvc --> DSL
-  DSL --> Guard
-  Guard --> Compile
-  Compile --> SFConn
-  Compile --> OASConn
-  SFConn -->|SOQL + OAuth refresh| Salesforce
-  OASConn -->|HTTP calls| APIs
-  Salesforce -->|rows| SFConn
-  APIs -->|rows| OASConn
+  DataSvc --> Model --> DB
+  DataSvc --> DSL --> Guard --> Compile
+  Compile --> SFConn --> Salesforce --> SFConn
+  Compile --> OASConn --> APIs --> OASConn
   DataSvc -->|rows| Router
 
   %% ============ Persistence ============
@@ -111,4 +103,3 @@ flowchart TB
   DataSvc --> KV
   Secrets --> SFConn
   Secrets --> Agent
-
