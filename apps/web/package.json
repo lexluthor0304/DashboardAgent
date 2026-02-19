@@ -1,0 +1,41 @@
+{
+  "name": "web",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "lint": "eslint .",
+    "test": "echo \"(skip web tests)\"",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@glideapps/glide-data-grid": "^6.0.3",
+    "@tanstack/react-query": "^5.85.0",
+    "arquero": "^8.0.0",
+    "d3": "^7.9.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-grid-layout": "^1.5.2",
+    "react-router-dom": "^7.8.2",
+    "react-spreadsheet": "^0.10.1",
+    "zustand": "^5.0.8"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.1",
+    "@types/node": "^24.10.1",
+    "@types/d3": "^7.4.3",
+    "@types/react": "^18.3.14",
+    "@types/react-dom": "^18.3.2",
+    "@types/react-grid-layout": "^2.1.0",
+    "@vitejs/plugin-react": "^5.1.1",
+    "eslint": "^9.39.1",
+    "eslint-plugin-react-hooks": "^7.0.1",
+    "eslint-plugin-react-refresh": "^0.4.24",
+    "globals": "^16.5.0",
+    "typescript": "~5.9.3",
+    "typescript-eslint": "^8.48.0",
+    "vite": "^7.3.1"
+  }
+}

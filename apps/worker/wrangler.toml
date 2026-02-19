@@ -1,0 +1,20 @@
+name = "dashboardagent-api"
+main = "src/index.ts"
+compatibility_date = "2026-02-19"
+
+# Workers AI binding: enables env.AI.run(modelId, ...)
+ai = { binding = "AI" }
+
+[vars]
+PRIMARY_MODEL_ID = "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b"
+FALLBACK_MODEL_ID = "@cf/qwen/qwq-32b"
+MODEL_TIMEOUT_MS = "25000"
+MAX_OUTPUT_TOKENS = "1200"
+REPAIR_MAX_ATTEMPTS = "2"
+SHARE_TOKEN_TTL_DAYS = "7"
+
+# D1 binding (fill database_id after `wrangler d1 create`)
+[[d1_databases]]
+binding = "DB"
+database_name = "dashboardagent"
+database_id = "70672432-7b8e-4aa4-bcb2-6c4f1310092b"

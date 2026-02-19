@@ -1,0 +1,18 @@
+{
+  "name": "dashboardagent",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently -n worker,web -c cyan,magenta \"npm run dev -w apps/worker\" \"npm run dev -w apps/web\"",
+    "build": "npm run build -w apps/web && npm run build -w apps/worker",
+    "lint": "npm run lint -w apps/web && npm run lint -w apps/worker",
+    "test": "npm run test -w apps/web && npm run test -w apps/worker"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  }
+}
+
