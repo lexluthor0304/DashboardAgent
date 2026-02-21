@@ -1,9 +1,16 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { runAgent } from "../api/client";
 import { useDashboardStore } from "../state/dashboardStore";
 
 type Msg = { role: "user" | "assistant"; content: string };
+
+function agentStageText(elapsedMs: number) {
+  if (elapsedMs < 4_000) return "Understanding your change request…";
+  if (elapsedMs < 10_000) return "Updating layout and visual settings…";
+  if (elapsedMs < 20_000) return "Applying data and transform updates…";
+  return "Finalizing dashboard update…";
+}
 
 export default function ChatPanel(props: { dashboardId: string; token: string }) {
   const { dashboardId, token } = props;
@@ -14,6 +21,7 @@ export default function ChatPanel(props: { dashboardId: string; token: string })
     { role: "assistant", content: "Describe the dashboard you want. Try: “make the chart a line chart”." },
   ]);
   const [draft, setDraft] = useState("");
+  const [elapsedMs, setElapsedMs] = useState(0);
 
   const canSend = Boolean(spec && draft.trim().length > 0);
 
@@ -38,6 +46,21 @@ export default function ChatPanel(props: { dashboardId: string; token: string })
     },
   });
 
+  useEffect(() => {
+    if (!mutation.isPending) {
+      setElapsedMs(0);
+      return;
+    }
+
+    const startedAt = Date.now();
+    setElapsedMs(0);
+    const timer = window.setInterval(() => {
+      setElapsedMs(Date.now() - startedAt);
+    }, 200);
+
+    return () => window.clearInterval(timer);
+  }, [mutation.isPending]);
+
   const quick = useMemo(
     () => [
       "Make the chart a line chart.",
@@ -49,91 +72,116 @@ export default function ChatPanel(props: { dashboardId: string; token: string })
     [],
   );
 
+  const stageText = useMemo(() => agentStageText(elapsedMs), [elapsedMs]);
+  const elapsedSeconds = Math.floor(elapsedMs / 1000);
+
   return (
-    <div className="panelInner" style={{ height: "100%", display: "grid", gridTemplateRows: "auto 1fr auto" }}>
-      <div className="pill" style={{ justifySelf: "start" }}>
-        <div style={{ fontWeight: 750 }}>Agent</div>
-        <div className="muted" style={{ fontSize: 12 }}>
-          Workers AI
-        </div>
-      </div>
-
-      <div style={{ marginTop: 12, overflow: "auto", paddingRight: 6 }}>
-        {messages.map((m, i) => (
-          <div
-            key={i}
-            style={{
-              marginBottom: 10,
-              padding: "10px 12px",
-              borderRadius: 14,
-              border: "1px solid var(--card-border)",
-              background: m.role === "user" ? "rgba(11, 114, 133, 0.10)" : "rgba(255,255,255,0.04)",
-            }}
-          >
-            <div className="muted" style={{ fontSize: 12, marginBottom: 4 }}>
-              {m.role === "user" ? "You" : "Agent"}
-            </div>
-            <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.45 }}>{m.content}</div>
+    <>
+      <div className="panelInner" style={{ height: "100%", display: "grid", gridTemplateRows: "auto 1fr auto" }}>
+        <div className="pill" style={{ justifySelf: "start" }}>
+          <div style={{ fontWeight: 750 }}>Agent</div>
+          <div className="muted" style={{ fontSize: 12 }}>
+            Workers AI
           </div>
-        ))}
-      </div>
+        </div>
 
-      <div style={{ display: "grid", gap: 10, marginTop: 12 }}>
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-          {quick.map((q) => (
-            <button
-              key={q}
-              className="btn"
-              type="button"
-              disabled={!spec || mutation.isPending}
-              onClick={() => {
-                setDraft(q);
+        <div style={{ marginTop: 12, overflow: "auto", paddingRight: 6 }}>
+          {messages.map((m, i) => (
+            <div
+              key={i}
+              style={{
+                marginBottom: 10,
+                padding: "10px 12px",
+                borderRadius: 14,
+                border: "1px solid var(--card-border)",
+                background: m.role === "user" ? "rgba(11, 114, 133, 0.10)" : "rgba(255,255,255,0.04)",
               }}
             >
-              {q}
-            </button>
+              <div className="muted" style={{ fontSize: 12, marginBottom: 4 }}>
+                {m.role === "user" ? "You" : "Agent"}
+              </div>
+              <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.45 }}>{m.content}</div>
+            </div>
           ))}
         </div>
 
-        <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 10 }}>
-          <input
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            placeholder={spec ? "Ask for changes…" : "Loading…"}
-            style={{
-              padding: "12px 14px",
-              borderRadius: 999,
-              border: "1px solid var(--card-border)",
-              background: "var(--card)",
-              color: "var(--text)",
-              outline: "none",
-            }}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
+        <div style={{ display: "grid", gap: 10, marginTop: 12 }}>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+            {quick.map((q) => (
+              <button
+                key={q}
+                className="btn"
+                type="button"
+                disabled={!spec || mutation.isPending}
+                onClick={() => {
+                  setDraft(q);
+                }}
+              >
+                {q}
+              </button>
+            ))}
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 10 }}>
+            <input
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              placeholder={spec ? "Ask for changes…" : "Loading…"}
+              style={{
+                padding: "12px 14px",
+                borderRadius: 999,
+                border: "1px solid var(--card-border)",
+                background: "var(--card)",
+                color: "var(--text)",
+                outline: "none",
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  if (!canSend) return;
+                  const text = draft.trim();
+                  setDraft("");
+                  mutation.mutate(text);
+                }
+              }}
+            />
+            <button
+              className="btn btnPrimary"
+              type="button"
+              disabled={!canSend || mutation.isPending}
+              onClick={() => {
                 if (!canSend) return;
                 const text = draft.trim();
                 setDraft("");
                 mutation.mutate(text);
-              }
-            }}
-          />
-          <button
-            className="btn btnPrimary"
-            type="button"
-            disabled={!canSend || mutation.isPending}
-            onClick={() => {
-              if (!canSend) return;
-              const text = draft.trim();
-              setDraft("");
-              mutation.mutate(text);
-            }}
-          >
-            {mutation.isPending ? "…" : "Send"}
-          </button>
+              }}
+            >
+              {mutation.isPending ? "…" : "Send"}
+            </button>
+          </div>
         </div>
       </div>
-    </div>
+
+      {mutation.isPending && (
+        <div className="genOverlay" role="status" aria-live="polite" aria-busy="true" aria-label="Updating dashboard with agent">
+          <div className="genOverlayCard">
+            <div className="genPulse" aria-hidden="true" />
+            <div className="genOverlayTitle">Updating dashboard</div>
+            <div className="genOverlayStage">{stageText}</div>
+            <div className="genProgressRail" aria-hidden="true">
+              <div className="genProgressBar" />
+            </div>
+            <div className="muted" style={{ fontSize: 12 }}>
+              Elapsed {elapsedSeconds}s
+            </div>
+            {elapsedMs >= 35_000 && (
+              <div className="muted" style={{ fontSize: 12 }}>
+                Still working, large updates can take close to a minute…
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </>
   );
 }
-
