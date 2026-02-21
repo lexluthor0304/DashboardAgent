@@ -64,7 +64,7 @@ export type TextWidget = WidgetBase & {
 export type Widget = D3ChartWidget | PivotTableWidget | SpreadsheetWidget | KpiWidget | TextWidget;
 
 export type DataRequest = {
-  kind: "demo_opps" | "salesforce_soql";
+  kind: "demo_opps" | "salesforce_soql_guarded";
   query?: unknown;
 };
 
@@ -76,12 +76,35 @@ export type DashboardSpec = {
   widgets: Widget[];
   dataRequests: Record<string, DataRequest>;
   transforms?: Record<string, unknown>;
+  meta?: {
+    scenarioClass: string;
+    generatedFromPrompt: string;
+    generatedAt: number;
+  };
+};
+
+export type GenerationSource = {
+  type: "demo" | "salesforce";
+  connectorId?: string;
 };
 
 export type CreateDashboardResponse = {
   dashboardId: string;
   shareToken: string;
   spec: DashboardSpec;
+};
+
+export type GenerateDashboardResponse = {
+  dashboardId: string;
+  shareToken: string;
+  spec: DashboardSpec;
+  generationMeta: {
+    modelUsed: string;
+    fallbackReason?: string;
+    repairAttempts: number;
+    durationMs: number;
+    scenarioClass: string;
+  };
 };
 
 export type AgentResponse = {
@@ -93,4 +116,3 @@ export type AgentResponse = {
   fallbackReason?: string;
   repairAttempts: number;
 };
-

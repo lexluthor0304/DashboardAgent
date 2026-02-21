@@ -53,6 +53,11 @@ export default function EditorPage() {
         <div className="brand">
           <div className="brandTitle">Editor</div>
           <div className="brandSubtitle">{spec?.title ?? "Loading…"}</div>
+          {spec?.meta?.scenarioClass && (
+            <div className="muted" style={{ fontSize: 12 }}>
+              scenario: <code>{spec.meta.scenarioClass}</code>
+            </div>
+          )}
         </div>
         <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", justifyContent: "flex-end" }}>
           <button className="btn" type="button" onClick={undo} disabled={!canUndo}>
@@ -82,4 +87,3 @@ export default function EditorPage() {
     </div>
   );
 }
-

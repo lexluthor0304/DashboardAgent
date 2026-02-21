@@ -1,4 +1,4 @@
-import type { AgentResponse, CreateDashboardResponse, DashboardSpec } from "../types/spec";
+import type { AgentResponse, CreateDashboardResponse, DashboardSpec, GenerateDashboardResponse, GenerationSource } from "../types/spec";
 
 function baseUrl() {
   const raw = import.meta.env.VITE_API_BASE_URL as string | undefined;
@@ -27,6 +27,14 @@ export async function createDashboard(): Promise<CreateDashboardResponse> {
   return fetchJson<CreateDashboardResponse>("/api/dashboards", { method: "POST" });
 }
 
+export async function generateDashboard(prompt: string, source: GenerationSource): Promise<GenerateDashboardResponse> {
+  return fetchJson<GenerateDashboardResponse>("/api/generate-dashboard", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ prompt, source }),
+  });
+}
+
 export async function getDashboard(dashboardId: string, token: string): Promise<{ spec: DashboardSpec }> {
   return fetchJson<{ spec: DashboardSpec }>(`/api/dashboards/${encodeURIComponent(dashboardId)}`, {
     headers: { Authorization: `Bearer ${token}` },
@@ -47,4 +55,3 @@ export async function getDataRows(dashboardId: string, token: string, requestId:
     headers: { Authorization: `Bearer ${token}` },
   });
 }
-
