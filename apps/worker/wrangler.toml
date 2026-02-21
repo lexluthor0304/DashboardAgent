@@ -12,6 +12,7 @@ MODEL_TIMEOUT_MS = "25000"
 MAX_OUTPUT_TOKENS = "1200"
 REPAIR_MAX_ATTEMPTS = "2"
 SHARE_TOKEN_TTL_DAYS = "7"
+SF_LOGIN_URL = "https://test.salesforce.com"
 
 # D1 binding (fill database_id after `wrangler d1 create`)
 [[d1_databases]]

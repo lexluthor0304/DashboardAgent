@@ -191,6 +191,61 @@ const GenerateDashboardResponseSchema = z.object({
   }),
 });
 
+const SalesforceStartRequestSchema = z.object({
+  dashboardId: z.string().min(1),
+  token: z.string().min(1),
+});
+
+const SalesforceStartResponseSchema = z.object({
+  connectorId: z.string(),
+  authorizeUrl: z.string().url(),
+  expiresAt: z.number().int().positive(),
+});
+
+const SalesforceStatusResponseSchema = z.object({
+  connected: z.boolean(),
+  connectorId: z.string().optional(),
+  environment: z.enum(["sandbox", "production"]).optional(),
+  status: z.enum(["pending", "connected", "error", "revoked"]).optional(),
+  instanceUrl: z.string().url().optional(),
+  orgId: z.string().optional(),
+  userId: z.string().optional(),
+  lastSyncAt: z.number().int().positive().optional(),
+  error: z.string().optional(),
+});
+
+const SalesforceQueryRequestSchema = z.object({
+  dashboardId: z.string().min(1),
+  token: z.string().min(1),
+  soql: z.string().min(1).max(10000),
+  maxRows: z.number().int().min(1).max(5000).optional(),
+});
+
+const SalesforceQueryResponseSchema = z.object({
+  rows: z.array(z.record(z.any())),
+  totalSize: z.number().int().nonnegative(),
+  done: z.boolean(),
+  nextRecordsUrl: z.string().optional(),
+});
+
+type SfConnectorStatus = "pending" | "connected" | "error" | "revoked";
+
+type SfConnectorRow = {
+  id: string;
+  dashboard_id: string;
+  environment: "sandbox" | "production";
+  status: SfConnectorStatus;
+  instance_url: string | null;
+  org_id: string | null;
+  user_id: string | null;
+  refresh_token_enc: string | null;
+  access_token_enc: string | null;
+  token_expires_at: number | null;
+  scopes: string | null;
+  created_at: number;
+  updated_at: number;
+};
+
 function nowEpochMs() {
   return Date.now();
 }
@@ -209,6 +264,97 @@ async function sha256Hex(input: string) {
 
 function ttlDaysToMs(days: number) {
   return days * 24 * 60 * 60 * 1000;
+}
+
+const SALESFORCE_API_VERSION = "v62.0";
+
+function loginHost(env: Env) {
+  const raw = (env.SF_LOGIN_URL || "https://test.salesforce.com").trim();
+  return raw.replace(/\/+$/, "");
+}
+
+function requireSfConfig(env: Env) {
+  if (!env.SF_CLIENT_ID || !env.SF_CLIENT_SECRET || !env.SF_REDIRECT_URI) {
+    throw new Error("missing_salesforce_oauth_config");
+  }
+}
+
+function bytesToBase64(bytes: Uint8Array) {
+  let s = "";
+  for (const b of bytes) s += String.fromCharCode(b);
+  return btoa(s);
+}
+
+function base64ToBytes(s: string) {
+  const bin = atob(s);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i += 1) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+function getEncryptionKeyRaw(env: Env) {
+  const key = env.ENCRYPTION_KEY?.trim();
+  if (!key) throw new Error("missing_encryption_key");
+  return key;
+}
+
+async function importAesGcmKey(env: Env) {
+  const raw = getEncryptionKeyRaw(env);
+  const keyBytes = base64ToBytes(raw);
+  if (keyBytes.length !== 32) throw new Error("invalid_encryption_key_length");
+  return crypto.subtle.importKey("raw", keyBytes, { name: "AES-GCM" }, false, ["encrypt", "decrypt"]);
+}
+
+async function encryptSecret(env: Env, plaintext: string) {
+  const key = await importAesGcmKey(env);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const data = new TextEncoder().encode(plaintext);
+  const encrypted = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, data));
+  return `${bytesToBase64(iv)}.${bytesToBase64(encrypted)}`;
+}
+
+async function decryptSecret(env: Env, encoded: string) {
+  const parts = encoded.split(".");
+  if (parts.length !== 2) throw new Error("invalid_secret_encoding");
+  const iv = base64ToBytes(parts[0]!);
+  const cipher = base64ToBytes(parts[1]!);
+  const key = await importAesGcmKey(env);
+  const out = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, cipher);
+  return new TextDecoder().decode(out);
+}
+
+function extractOrgUserFromIdentityUrl(identityUrl: string | null | undefined) {
+  if (!identityUrl) return { orgId: null as string | null, userId: null as string | null };
+  const m = /\/id\/([^/]+)\/([^/]+)$/.exec(identityUrl);
+  return { orgId: m?.[1] ?? null, userId: m?.[2] ?? null };
+}
+
+function sanitizeSoqlSelect(input: string, maxRows: number) {
+  const trimmed = input.trim().replace(/\s+/g, " ");
+  if (!/^select\b/i.test(trimmed)) throw new Error("invalid_soql_only_select_allowed");
+  if (trimmed.includes(";")) throw new Error("invalid_soql_multistatement_not_allowed");
+  if (/\b(insert|update|delete|upsert|merge|truncate|drop|alter|create)\b/i.test(trimmed)) {
+    throw new Error("invalid_soql_contains_mutation_keywords");
+  }
+  const limitMatch = /\blimit\s+(\d+)\b/i.exec(trimmed);
+  if (!limitMatch) return `${trimmed} LIMIT ${maxRows}`;
+  const requested = Number(limitMatch[1]);
+  if (!Number.isFinite(requested) || requested <= 0) throw new Error("invalid_soql_limit");
+  if (requested <= maxRows) return trimmed;
+  return trimmed.replace(/\blimit\s+\d+\b/i, `LIMIT ${maxRows}`);
+}
+
+function buildOpportunitySoqlFromRequest(requestQuery: unknown) {
+  const q = (requestQuery && typeof requestQuery === "object" ? requestQuery : {}) as Record<string, unknown>;
+  if (typeof q.soql === "string" && q.soql.trim().length > 0) return q.soql;
+  const maxRows = Math.min(5000, Math.max(1, Number(q.limit ?? 2000) || 2000));
+  return [
+    "SELECT Id, Name, StageName, Amount, CloseDate, IsWon,",
+    "Owner.Name, Account.Name, Account.BillingCountry",
+    "FROM Opportunity",
+    "ORDER BY CloseDate DESC",
+    `LIMIT ${maxRows}`,
+  ].join(" ");
 }
 
 function defaultDemoSpec(dashboardId: string): DashboardSpec {
@@ -493,6 +639,101 @@ async function dbVerifyShareToken(env: Env, dashboardId: string, token: string):
   return Boolean(row?.ok);
 }
 
+async function dbCleanupExpiredOauthStates(env: Env) {
+  await env.DB.prepare("DELETE FROM connector_oauth_states WHERE expires_at <= ?").bind(nowEpochMs()).run();
+}
+
+async function dbUpsertSfConnector(
+  env: Env,
+  row: {
+    id: string;
+    dashboardId: string;
+    environment: "sandbox" | "production";
+    status: SfConnectorStatus;
+    instanceUrl?: string | null;
+    orgId?: string | null;
+    userId?: string | null;
+    refreshTokenEnc?: string | null;
+    accessTokenEnc?: string | null;
+    tokenExpiresAt?: number | null;
+    scopes?: string | null;
+  },
+) {
+  const ts = nowEpochMs();
+  await env.DB.prepare(
+    "INSERT INTO sf_connectors(" +
+      "id, dashboard_id, environment, status, instance_url, org_id, user_id, refresh_token_enc, access_token_enc, token_expires_at, scopes, created_at, updated_at" +
+      ") VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
+      "ON CONFLICT(id) DO UPDATE SET " +
+      "dashboard_id=excluded.dashboard_id, environment=excluded.environment, status=excluded.status, instance_url=excluded.instance_url, " +
+      "org_id=excluded.org_id, user_id=excluded.user_id, refresh_token_enc=excluded.refresh_token_enc, access_token_enc=excluded.access_token_enc, " +
+      "token_expires_at=excluded.token_expires_at, scopes=excluded.scopes, updated_at=excluded.updated_at",
+  )
+    .bind(
+      row.id,
+      row.dashboardId,
+      row.environment,
+      row.status,
+      row.instanceUrl ?? null,
+      row.orgId ?? null,
+      row.userId ?? null,
+      row.refreshTokenEnc ?? null,
+      row.accessTokenEnc ?? null,
+      row.tokenExpiresAt ?? null,
+      row.scopes ?? null,
+      ts,
+      ts,
+    )
+    .run();
+}
+
+async function dbGetSfConnectorById(env: Env, connectorId: string): Promise<SfConnectorRow | null> {
+  const row = await env.DB.prepare(
+    "SELECT id, dashboard_id, environment, status, instance_url, org_id, user_id, refresh_token_enc, access_token_enc, token_expires_at, scopes, created_at, updated_at " +
+      "FROM sf_connectors WHERE id = ? LIMIT 1",
+  )
+    .bind(connectorId)
+    .first<SfConnectorRow>();
+  return row ?? null;
+}
+
+async function dbGetLatestSfConnectorByDashboard(env: Env, dashboardId: string): Promise<SfConnectorRow | null> {
+  const row = await env.DB.prepare(
+    "SELECT id, dashboard_id, environment, status, instance_url, org_id, user_id, refresh_token_enc, access_token_enc, token_expires_at, scopes, created_at, updated_at " +
+      "FROM sf_connectors WHERE dashboard_id = ? ORDER BY updated_at DESC LIMIT 1",
+  )
+    .bind(dashboardId)
+    .first<SfConnectorRow>();
+  return row ?? null;
+}
+
+async function dbInsertOauthState(
+  env: Env,
+  args: { state: string; dashboardId: string; connectorId: string; expiresAt: number },
+) {
+  await env.DB.prepare(
+    "INSERT INTO connector_oauth_states(state, dashboard_id, connector_id, expires_at, created_at) VALUES(?, ?, ?, ?, ?)",
+  )
+    .bind(args.state, args.dashboardId, args.connectorId, args.expiresAt, nowEpochMs())
+    .run();
+}
+
+async function dbTakeOauthState(env: Env, state: string) {
+  const row = await env.DB.prepare(
+    "SELECT state, dashboard_id, connector_id, expires_at FROM connector_oauth_states WHERE state = ? LIMIT 1",
+  )
+    .bind(state)
+    .first<{ state: string; dashboard_id: string; connector_id: string; expires_at: number }>();
+  if (!row) return null;
+  await env.DB.prepare("DELETE FROM connector_oauth_states WHERE state = ?").bind(state).run();
+  if (row.expires_at <= nowEpochMs()) return null;
+  return row;
+}
+
+async function dbRequireDashboardAccess(env: Env, dashboardId: string, token: string) {
+  if (!(await dbVerifyShareToken(env, dashboardId, token))) throw new Error("invalid_dashboard_token");
+}
+
 function extractTokenFromRequest(req: Request, fallback?: string): string | null {
   const auth = req.headers.get("authorization");
   if (auth && auth.toLowerCase().startsWith("bearer ")) return auth.slice("bearer ".length).trim();
@@ -500,7 +741,301 @@ function extractTokenFromRequest(req: Request, fallback?: string): string | null
   return null;
 }
 
+async function salesforceTokenRequest(env: Env, form: URLSearchParams) {
+  const res = await fetch(`${loginHost(env)}/services/oauth2/token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: form.toString(),
+  });
+  const json = (await res.json()) as Record<string, unknown>;
+  if (!res.ok) {
+    const err = typeof json.error_description === "string" ? json.error_description : typeof json.error === "string" ? json.error : "oauth_failed";
+    throw new Error(`salesforce_oauth_failed:${err}`);
+  }
+  return json;
+}
+
+async function exchangeAuthCodeForTokens(env: Env, code: string) {
+  requireSfConfig(env);
+  const form = new URLSearchParams();
+  form.set("grant_type", "authorization_code");
+  form.set("client_id", env.SF_CLIENT_ID!);
+  form.set("client_secret", env.SF_CLIENT_SECRET!);
+  form.set("redirect_uri", env.SF_REDIRECT_URI!);
+  form.set("code", code);
+  return salesforceTokenRequest(env, form);
+}
+
+async function refreshSfAccessToken(env: Env, connector: SfConnectorRow) {
+  requireSfConfig(env);
+  if (!connector.refresh_token_enc) throw new Error("salesforce_refresh_token_missing");
+  const refreshToken = await decryptSecret(env, connector.refresh_token_enc);
+  const form = new URLSearchParams();
+  form.set("grant_type", "refresh_token");
+  form.set("client_id", env.SF_CLIENT_ID!);
+  form.set("client_secret", env.SF_CLIENT_SECRET!);
+  form.set("refresh_token", refreshToken);
+  const refreshed = await salesforceTokenRequest(env, form);
+  const accessToken = String(refreshed.access_token ?? "");
+  if (!accessToken) throw new Error("salesforce_access_token_missing");
+  const accessTokenEnc = await encryptSecret(env, accessToken);
+  const instanceUrl = typeof refreshed.instance_url === "string" ? refreshed.instance_url : connector.instance_url;
+  await dbUpsertSfConnector(env, {
+    id: connector.id,
+    dashboardId: connector.dashboard_id,
+    environment: connector.environment,
+    status: "connected",
+    instanceUrl,
+    orgId: connector.org_id,
+    userId: connector.user_id,
+    refreshTokenEnc: connector.refresh_token_enc,
+    accessTokenEnc,
+    tokenExpiresAt: nowEpochMs() + 55 * 60 * 1000,
+    scopes: connector.scopes,
+  });
+  const latest = await dbGetSfConnectorById(env, connector.id);
+  if (!latest) throw new Error("connector_not_found_after_refresh");
+  return latest;
+}
+
+async function runSalesforceSoql(env: Env, connector: SfConnectorRow, soql: string) {
+  let active = connector;
+  if (!active.instance_url) throw new Error("salesforce_instance_url_missing");
+  if (!active.access_token_enc || !active.token_expires_at || active.token_expires_at <= nowEpochMs() + 15_000) {
+    active = await refreshSfAccessToken(env, active);
+  }
+
+  async function queryOnce(withConnector: SfConnectorRow) {
+    if (!withConnector.access_token_enc) throw new Error("salesforce_access_token_missing");
+    if (!withConnector.instance_url) throw new Error("salesforce_instance_url_missing");
+    const accessToken = await decryptSecret(env, withConnector.access_token_enc);
+    const queryUrl = `${withConnector.instance_url}/services/data/${SALESFORCE_API_VERSION}/query?q=${encodeURIComponent(soql)}`;
+    const res = await fetch(queryUrl, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        Accept: "application/json",
+      },
+    });
+    const json = (await res.json()) as Record<string, unknown>;
+    if (!res.ok) {
+      const firstErr = Array.isArray(json) ? (json[0] as any) : null;
+      const code = firstErr?.errorCode ?? (json as any)?.errorCode;
+      const message = firstErr?.message ?? (json as any)?.message ?? "salesforce_query_failed";
+      const err = new Error(`salesforce_query_failed:${message}`);
+      (err as any).sfErrorCode = code;
+      throw err;
+    }
+    return json;
+  }
+
+  try {
+    return await queryOnce(active);
+  } catch (e) {
+    const code = (e as any)?.sfErrorCode;
+    if (code === "INVALID_SESSION_ID") {
+      const refreshed = await refreshSfAccessToken(env, active);
+      return queryOnce(refreshed);
+    }
+    throw e;
+  }
+}
+
+function toDashboardRowsFromSf(records: unknown[]) {
+  return records.map((r) => {
+    const rec = (r && typeof r === "object" ? r : {}) as Record<string, any>;
+    const account = (rec.Account && typeof rec.Account === "object" ? rec.Account : {}) as Record<string, any>;
+    const owner = (rec.Owner && typeof rec.Owner === "object" ? rec.Owner : {}) as Record<string, any>;
+    return {
+      Id: rec.Id ?? null,
+      Name: rec.Name ?? null,
+      StageName: rec.StageName ?? null,
+      Amount: typeof rec.Amount === "number" ? rec.Amount : Number(rec.Amount ?? 0) || 0,
+      CloseDate: rec.CloseDate ?? null,
+      OwnerName: owner.Name ?? rec.OwnerName ?? null,
+      Region: account.BillingCountry ?? rec.Region ?? null,
+      AccountName: account.Name ?? null,
+      IsWon: rec.IsWon ?? null,
+    };
+  });
+}
+
 app.get("/api/health", (c) => c.json({ ok: true, ts: nowEpochMs() }));
+
+app.post("/api/connectors/salesforce/sandbox/start", async (c) => {
+  const body = SalesforceStartRequestSchema.parse(await c.req.json());
+  const token = extractTokenFromRequest(c.req.raw, body.token);
+  if (!token) return c.json({ error: "missing token" }, 401);
+  try {
+    await dbRequireDashboardAccess(c.env, body.dashboardId, token);
+    requireSfConfig(c.env);
+    getEncryptionKeyRaw(c.env);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "invalid_request";
+    if (msg === "invalid_dashboard_token") return c.json({ error: "invalid token" }, 403);
+    if (msg === "missing_salesforce_oauth_config") return c.json({ error: "missing_salesforce_oauth_config" }, 500);
+    if (msg === "missing_encryption_key") return c.json({ error: "missing_encryption_key" }, 500);
+    return c.json({ error: "connector_start_failed" }, 400);
+  }
+
+  await dbCleanupExpiredOauthStates(c.env);
+  const connectorId = randomId("sfconn");
+  const state = randomId("sfoauth");
+  const expiresAt = nowEpochMs() + 10 * 60 * 1000;
+  await dbUpsertSfConnector(c.env, {
+    id: connectorId,
+    dashboardId: body.dashboardId,
+    environment: "sandbox",
+    status: "pending",
+  });
+  await dbInsertOauthState(c.env, { state, dashboardId: body.dashboardId, connectorId, expiresAt });
+
+  const authUrl = new URL(`${loginHost(c.env)}/services/oauth2/authorize`);
+  authUrl.searchParams.set("response_type", "code");
+  authUrl.searchParams.set("client_id", c.env.SF_CLIENT_ID!);
+  authUrl.searchParams.set("redirect_uri", c.env.SF_REDIRECT_URI!);
+  authUrl.searchParams.set("state", state);
+  authUrl.searchParams.set("scope", "api refresh_token");
+  authUrl.searchParams.set("prompt", "consent");
+
+  const resp = SalesforceStartResponseSchema.parse({
+    connectorId,
+    authorizeUrl: authUrl.toString(),
+    expiresAt,
+  });
+  return c.json(resp);
+});
+
+app.get("/api/connectors/salesforce/callback", async (c) => {
+  const url = new URL(c.req.url);
+  const state = url.searchParams.get("state") ?? "";
+  const code = url.searchParams.get("code") ?? "";
+  const sfError = url.searchParams.get("error");
+  const sfErrorDesc = url.searchParams.get("error_description");
+
+  if (sfError) {
+    return c.html(
+      `<html><body><h3>Salesforce connection failed</h3><pre>${sfError}${sfErrorDesc ? `: ${sfErrorDesc}` : ""}</pre></body></html>`,
+      400,
+    );
+  }
+  if (!state || !code) return c.html("<html><body><h3>Missing code/state</h3></body></html>", 400);
+
+  const stateRow = await dbTakeOauthState(c.env, state);
+  if (!stateRow) return c.html("<html><body><h3>State expired or invalid</h3></body></html>", 400);
+
+  const connector = await dbGetSfConnectorById(c.env, stateRow.connector_id);
+  if (!connector) return c.html("<html><body><h3>Connector not found</h3></body></html>", 404);
+
+  try {
+    const tokens = await exchangeAuthCodeForTokens(c.env, code);
+    const accessToken = String(tokens.access_token ?? "");
+    const refreshTokenRaw = typeof tokens.refresh_token === "string" ? tokens.refresh_token : null;
+    const instanceUrl = typeof tokens.instance_url === "string" ? tokens.instance_url : connector.instance_url;
+    if (!accessToken || !instanceUrl) throw new Error("salesforce_token_exchange_missing_values");
+    const refreshToken = refreshTokenRaw ?? (connector.refresh_token_enc ? await decryptSecret(c.env, connector.refresh_token_enc) : null);
+    if (!refreshToken) throw new Error("salesforce_refresh_token_missing");
+
+    const accessTokenEnc = await encryptSecret(c.env, accessToken);
+    const refreshTokenEnc = await encryptSecret(c.env, refreshToken);
+    const idUrl = typeof tokens.id === "string" ? tokens.id : null;
+    const ids = extractOrgUserFromIdentityUrl(idUrl);
+    const scopes = typeof tokens.scope === "string" ? tokens.scope : connector.scopes;
+    await dbUpsertSfConnector(c.env, {
+      id: connector.id,
+      dashboardId: connector.dashboard_id,
+      environment: "sandbox",
+      status: "connected",
+      instanceUrl,
+      orgId: ids.orgId,
+      userId: ids.userId,
+      refreshTokenEnc,
+      accessTokenEnc,
+      tokenExpiresAt: nowEpochMs() + 55 * 60 * 1000,
+      scopes,
+    });
+    return c.html(
+      "<html><body><h3>Salesforce Sandbox connected.</h3><p>You can return to the dashboard editor.</p><script>setTimeout(()=>window.close(),900);</script></body></html>",
+      200,
+    );
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "oauth_exchange_failed";
+    await dbUpsertSfConnector(c.env, {
+      id: connector.id,
+      dashboardId: connector.dashboard_id,
+      environment: "sandbox",
+      status: "error",
+      instanceUrl: connector.instance_url,
+      orgId: connector.org_id,
+      userId: connector.user_id,
+      refreshTokenEnc: connector.refresh_token_enc,
+      accessTokenEnc: connector.access_token_enc,
+      tokenExpiresAt: connector.token_expires_at,
+      scopes: connector.scopes,
+    });
+    return c.html(`<html><body><h3>Connection failed</h3><pre>${msg}</pre></body></html>`, 500);
+  }
+});
+
+app.get("/api/connectors/salesforce/status", async (c) => {
+  const url = new URL(c.req.url);
+  const dashboardId = url.searchParams.get("dashboardId") ?? "";
+  const token = extractTokenFromRequest(c.req.raw, url.searchParams.get("token") ?? undefined);
+  if (!dashboardId) return c.json({ error: "missing dashboardId" }, 400);
+  if (!token) return c.json({ error: "missing token" }, 401);
+  if (!(await dbVerifyShareToken(c.env, dashboardId, token))) return c.json({ error: "invalid token" }, 403);
+  const connector = await dbGetLatestSfConnectorByDashboard(c.env, dashboardId);
+  if (!connector) {
+    const resp = SalesforceStatusResponseSchema.parse({ connected: false });
+    return c.json(resp);
+  }
+  const resp = SalesforceStatusResponseSchema.parse({
+    connected: connector.status === "connected",
+    connectorId: connector.id,
+    environment: connector.environment,
+    status: connector.status,
+    instanceUrl: connector.instance_url ?? undefined,
+    orgId: connector.org_id ?? undefined,
+    userId: connector.user_id ?? undefined,
+    lastSyncAt: connector.updated_at,
+  });
+  return c.json(resp);
+});
+
+app.post("/api/connectors/:connectorId/query", async (c) => {
+  const connectorId = c.req.param("connectorId");
+  const body = SalesforceQueryRequestSchema.parse(await c.req.json());
+  const token = extractTokenFromRequest(c.req.raw, body.token);
+  if (!token) return c.json({ error: "missing token" }, 401);
+  if (!(await dbVerifyShareToken(c.env, body.dashboardId, token))) return c.json({ error: "invalid token" }, 403);
+  const connector = await dbGetSfConnectorById(c.env, connectorId);
+  if (!connector || connector.dashboard_id !== body.dashboardId) return c.json({ error: "connector_not_found" }, 404);
+  if (connector.status !== "connected") return c.json({ error: "connector_not_connected" }, 409);
+
+  let guardedSoql = "";
+  try {
+    guardedSoql = sanitizeSoqlSelect(body.soql, Math.min(5000, body.maxRows ?? 2000));
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "invalid_soql";
+    return c.json({ error: msg }, 400);
+  }
+
+  try {
+    const data = await runSalesforceSoql(c.env, connector, guardedSoql);
+    const records = Array.isArray((data as any).records) ? ((data as any).records as unknown[]) : [];
+    const rows = toDashboardRowsFromSf(records);
+    const resp = SalesforceQueryResponseSchema.parse({
+      rows,
+      totalSize: Number((data as any).totalSize ?? rows.length),
+      done: Boolean((data as any).done ?? true),
+      nextRecordsUrl: typeof (data as any).nextRecordsUrl === "string" ? (data as any).nextRecordsUrl : undefined,
+    });
+    return c.json(resp);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "salesforce_query_failed";
+    return c.json({ error: msg }, 502);
+  }
+});
 
 app.post("/api/generate-dashboard", async (c) => {
   const startedAt = nowEpochMs();
@@ -1102,13 +1637,27 @@ app.get("/api/dashboards/:id/data", async (c) => {
   }
 
   if (req.kind === "salesforce_soql_guarded") {
-    // MVP fallback: until connector execution is wired, serve demo opportunity-like rows.
-    // This keeps generated dashboards renderable for "salesforce" source selection.
-    return c.json({
-      rows: demoOpportunities(),
-      schema: { fields: Object.keys(demoOpportunities()[0] ?? {}) },
-      warning: "salesforce_connector_not_wired_using_demo_rows",
-    });
+    const connector = await dbGetLatestSfConnectorByDashboard(c.env, dashboardId);
+    if (!connector || connector.status !== "connected") {
+      return c.json({ error: "salesforce_connector_missing", action: "connect_sandbox" }, 409);
+    }
+    try {
+      const soqlRaw = buildOpportunitySoqlFromRequest(req.query);
+      const maxRows = Math.min(5000, Math.max(1, Number((req.query as any)?.limit ?? 2000) || 2000));
+      const soql = sanitizeSoqlSelect(soqlRaw, maxRows);
+      const data = await runSalesforceSoql(c.env, connector, soql);
+      const records = Array.isArray((data as any).records) ? ((data as any).records as unknown[]) : [];
+      const rows = toDashboardRowsFromSf(records);
+      return c.json({
+        rows,
+        schema: { fields: Object.keys(rows[0] ?? {}) },
+        totalSize: Number((data as any).totalSize ?? rows.length),
+        done: Boolean((data as any).done ?? true),
+      });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "salesforce_query_failed";
+      return c.json({ error: msg }, 502);
+    }
   }
 
   return c.json({ error: "not implemented" }, 501);

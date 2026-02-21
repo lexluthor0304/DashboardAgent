@@ -1,4 +1,12 @@
-import type { AgentResponse, CreateDashboardResponse, DashboardSpec, GenerateDashboardResponse, GenerationSource } from "../types/spec";
+import type {
+  AgentResponse,
+  CreateDashboardResponse,
+  DashboardSpec,
+  GenerateDashboardResponse,
+  GenerationSource,
+  SalesforceConnectorStartResponse,
+  SalesforceConnectorStatusResponse,
+} from "../types/spec";
 
 function baseUrl() {
   const raw = import.meta.env.VITE_API_BASE_URL as string | undefined;
@@ -52,6 +60,27 @@ export async function runAgent(dashboardId: string, token: string, message: stri
 export async function getDataRows(dashboardId: string, token: string, requestId: string): Promise<{ rows: any[]; schema?: any }> {
   const qs = new URLSearchParams({ requestId });
   return fetchJson<{ rows: any[]; schema?: any }>(`/api/dashboards/${encodeURIComponent(dashboardId)}/data?${qs.toString()}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function startSalesforceSandboxConnect(
+  dashboardId: string,
+  token: string,
+): Promise<SalesforceConnectorStartResponse> {
+  return fetchJson<SalesforceConnectorStartResponse>("/api/connectors/salesforce/sandbox/start", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ dashboardId, token }),
+  });
+}
+
+export async function getSalesforceConnectorStatus(
+  dashboardId: string,
+  token: string,
+): Promise<SalesforceConnectorStatusResponse> {
+  const qs = new URLSearchParams({ dashboardId });
+  return fetchJson<SalesforceConnectorStatusResponse>(`/api/connectors/salesforce/status?${qs.toString()}`, {
     headers: { Authorization: `Bearer ${token}` },
   });
 }

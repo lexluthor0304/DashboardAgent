@@ -1,7 +1,7 @@
 import { useEffect, useMemo } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { Link, useParams, useSearchParams } from "react-router-dom";
-import { getDashboard } from "../api/client";
+import { getDashboard, getSalesforceConnectorStatus, startSalesforceSandboxConnect } from "../api/client";
 import { useDashboardStore } from "../state/dashboardStore";
 import ChatPanel from "../components/ChatPanel";
 import Canvas from "../components/Canvas";
@@ -44,6 +44,37 @@ export default function EditorPage() {
     return `/d/${encodeURIComponent(dashboardId)}?${qs.toString()}`;
   }, [dashboardId, token]);
 
+  const effectiveSpec = spec ?? q.data?.spec;
+  const requiresSalesforce = useMemo(() => {
+    if (!effectiveSpec) return false;
+    return Object.values(effectiveSpec.dataRequests ?? {}).some((r) => r?.kind === "salesforce_soql_guarded");
+  }, [effectiveSpec]);
+
+  const sfStatusQ = useQuery({
+    queryKey: ["sf-status", dashboardId, token],
+    queryFn: async () => {
+      if (!dashboardId) throw new Error("Missing dashboardId");
+      if (!token) throw new Error("Missing token");
+      return getSalesforceConnectorStatus(dashboardId, token);
+    },
+    enabled: Boolean(dashboardId && token && requiresSalesforce),
+    refetchInterval: (query) => (query.state.data?.status === "pending" ? 5000 : false),
+  });
+
+  const sfStart = useMutation({
+    mutationFn: async () => {
+      if (!dashboardId) throw new Error("Missing dashboardId");
+      return startSalesforceSandboxConnect(dashboardId, token);
+    },
+    onSuccess: (res) => {
+      const child = window.open(res.authorizeUrl, "_blank", "noopener,noreferrer");
+      if (!child) window.location.assign(res.authorizeUrl);
+      window.setTimeout(() => {
+        sfStatusQ.refetch();
+      }, 1200);
+    },
+  });
+
   if (!dashboardId) return <div className="muted">Missing dashboardId</div>;
   if (!token) return <div className="muted">Missing token. Create a dashboard from the home page.</div>;
 
@@ -60,6 +91,37 @@ export default function EditorPage() {
           )}
         </div>
         <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", justifyContent: "flex-end" }}>
+          {requiresSalesforce && (
+            <>
+              <div className="pill">
+                <div className="muted" style={{ fontSize: 12 }}>
+                  Salesforce:
+                </div>
+                <div style={{ fontSize: 12, fontWeight: 700 }}>
+                  {sfStatusQ.isLoading
+                    ? "checking…"
+                    : sfStatusQ.data?.connected
+                      ? "connected"
+                      : sfStatusQ.data?.status === "pending"
+                        ? "auth pending"
+                        : "not connected"}
+                </div>
+              </div>
+              <button className="btn" type="button" onClick={() => sfStatusQ.refetch()} disabled={sfStatusQ.isFetching}>
+                {sfStatusQ.isFetching ? "Refreshing…" : "Refresh SF status"}
+              </button>
+              <button className="btn btnPrimary" type="button" onClick={() => sfStart.mutate()} disabled={sfStart.isPending}>
+                {sfStart.isPending ? "Opening…" : "Connect Sandbox"}
+              </button>
+              {(sfStart.isError || sfStatusQ.isError) && (
+                <div className="pill">
+                  <div className="muted" style={{ fontSize: 12 }}>
+                    SF error: {(sfStart.error as Error | undefined)?.message ?? (sfStatusQ.error as Error | undefined)?.message}
+                  </div>
+                </div>
+              )}
+            </>
+          )}
           <button className="btn" type="button" onClick={undo} disabled={!canUndo}>
             Undo
           </button>

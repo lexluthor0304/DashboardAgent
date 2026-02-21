@@ -116,3 +116,21 @@ export type AgentResponse = {
   fallbackReason?: string;
   repairAttempts: number;
 };
+
+export type SalesforceConnectorStartResponse = {
+  connectorId: string;
+  authorizeUrl: string;
+  expiresAt: number;
+};
+
+export type SalesforceConnectorStatusResponse = {
+  connected: boolean;
+  connectorId?: string;
+  environment?: "sandbox" | "production";
+  status?: "pending" | "connected" | "error" | "revoked";
+  instanceUrl?: string;
+  orgId?: string;
+  userId?: string;
+  lastSyncAt?: number;
+  error?: string;
+};
