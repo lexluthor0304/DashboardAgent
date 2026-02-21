@@ -1,0 +1,22 @@
+{
+  "name": "dashboardagent-worker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev --port 8787",
+    "deploy": "wrangler deploy",
+    "lint": "echo \"(skip worker lint)\"",
+    "test": "echo \"(skip worker tests)\""
+  },
+  "dependencies": {
+    "fast-json-patch": "^3.1.1",
+    "hono": "^4.9.7",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250214.0",
+    "typescript": "^5.8.2",
+    "wrangler": "^4.43.0"
+  }
+}
+

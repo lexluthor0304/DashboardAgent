@@ -1,0 +1,284 @@
+/* Intentional, theme-token driven UI (no system defaults). */
+:root {
+  --bg: #f7f3ea;
+  --bg-2: #efe7d6;
+  --card: rgba(255, 255, 255, 0.7);
+  --card-border: rgba(16, 24, 40, 0.12);
+  --text: #0f172a;
+  --muted: rgba(15, 23, 42, 0.62);
+  --accent: #0b7285;
+  --accent-2: #1c7ed6;
+  --shadow: rgba(2, 6, 23, 0.12);
+
+  --radius: 16px;
+  --radius-sm: 12px;
+
+  --font-sans: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji",
+    "Segoe UI Emoji";
+  --font-display: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
+
+  font-family: var(--font-sans);
+  color: var(--text);
+  background: radial-gradient(1200px 600px at 10% -10%, rgba(11, 114, 133, 0.18), transparent 60%),
+    radial-gradient(900px 500px at 95% 10%, rgba(28, 126, 214, 0.18), transparent 55%),
+    linear-gradient(180deg, var(--bg), var(--bg-2));
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Theme: noir */
+[data-theme="noir"] {
+  --bg: #0b0f17;
+  --bg-2: #0a0d13;
+  --card: rgba(255, 255, 255, 0.06);
+  --card-border: rgba(255, 255, 255, 0.12);
+  --text: rgba(255, 255, 255, 0.92);
+  --muted: rgba(255, 255, 255, 0.62);
+  --accent: #f59f00;
+  --accent-2: #15aabf;
+  --shadow: rgba(0, 0, 0, 0.35);
+
+  background: radial-gradient(900px 500px at 15% -10%, rgba(245, 159, 0, 0.18), transparent 60%),
+    radial-gradient(900px 500px at 85% 10%, rgba(21, 170, 191, 0.18), transparent 55%),
+    linear-gradient(180deg, var(--bg), var(--bg-2));
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 0.95em;
+}
+
+.appShell {
+  min-height: 100vh;
+  display: grid;
+  grid-template-rows: auto 1fr;
+}
+
+.topBar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 18px;
+}
+
+.brand {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.brandTitle {
+  font-family: var(--font-display);
+  font-size: 14px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.brandSubtitle {
+  font-size: 16px;
+  font-weight: 650;
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--card-border);
+  background: var(--card);
+  border-radius: 999px;
+  box-shadow: 0 10px 28px var(--shadow);
+  backdrop-filter: blur(12px);
+}
+
+.btn {
+  appearance: none;
+  border: 1px solid var(--card-border);
+  background: var(--card);
+  color: var(--text);
+  border-radius: 999px;
+  padding: 10px 12px;
+  cursor: pointer;
+  font-weight: 650;
+  box-shadow: 0 10px 28px var(--shadow);
+  backdrop-filter: blur(12px);
+}
+
+.btnPrimary {
+  border-color: rgba(11, 114, 133, 0.35);
+  background: linear-gradient(135deg, rgba(11, 114, 133, 0.18), rgba(28, 126, 214, 0.18));
+}
+
+.btn:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+
+.layoutSplit {
+  display: grid;
+  grid-template-columns: 420px 1fr;
+  min-height: 0;
+}
+
+@media (max-width: 980px) {
+  .layoutSplit {
+    grid-template-columns: 1fr;
+  }
+}
+
+.panel {
+  min-height: 0;
+  border-top: 1px solid var(--card-border);
+}
+
+.panelInner {
+  height: 100%;
+  padding: 14px;
+}
+
+.card {
+  border: 1px solid var(--card-border);
+  background: var(--card);
+  border-radius: var(--radius);
+  box-shadow: 0 18px 40px var(--shadow);
+  backdrop-filter: blur(12px);
+  overflow: hidden;
+}
+
+.cardHeader {
+  padding: 12px 14px;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  border-bottom: 1px solid var(--card-border);
+}
+
+.cardTitle {
+  font-weight: 720;
+}
+
+.cardBody {
+  padding: 12px 14px;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.genOverlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(8, 12, 20, 0.42);
+  backdrop-filter: blur(6px);
+}
+
+.genOverlayCard {
+  width: min(520px, 100%);
+  display: grid;
+  gap: 12px;
+  border: 1px solid var(--card-border);
+  background: var(--card);
+  border-radius: var(--radius);
+  padding: 22px 20px;
+  box-shadow: 0 24px 48px var(--shadow);
+  backdrop-filter: blur(16px);
+}
+
+.genPulse {
+  width: 12px;
+  height: 12px;
+  border-radius: 999px;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  box-shadow: 0 0 0 rgba(11, 114, 133, 0.45);
+  animation: genPulseGlow 1.5s ease-out infinite;
+}
+
+.genOverlayTitle {
+  font-size: 21px;
+  font-weight: 760;
+  letter-spacing: -0.01em;
+}
+
+.genOverlayStage {
+  color: var(--muted);
+  font-size: 14px;
+  min-height: 20px;
+}
+
+.genProgressRail {
+  position: relative;
+  overflow: hidden;
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(11, 114, 133, 0.16);
+}
+
+.genProgressBar {
+  position: absolute;
+  inset: 0;
+  width: 38%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  transform: translateX(-120%);
+  animation: genProgressSlide 1.2s ease-in-out infinite;
+}
+
+@keyframes genPulseGlow {
+  0% {
+    transform: scale(0.92);
+    box-shadow: 0 0 0 0 rgba(11, 114, 133, 0.45);
+  }
+
+  70% {
+    transform: scale(1);
+    box-shadow: 0 0 0 13px rgba(11, 114, 133, 0);
+  }
+
+  100% {
+    transform: scale(0.92);
+    box-shadow: 0 0 0 0 rgba(11, 114, 133, 0);
+  }
+}
+
+@keyframes genProgressSlide {
+  0% {
+    transform: translateX(-120%);
+  }
+
+  100% {
+    transform: translateX(300%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .genPulse,
+  .genProgressBar {
+    animation: none;
+  }
+}
