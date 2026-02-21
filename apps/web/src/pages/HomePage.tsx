@@ -4,11 +4,19 @@ import { useNavigate } from "react-router-dom";
 import { createDashboard, generateDashboard } from "../api/client";
 import { useDashboardStore } from "../state/dashboardStore";
 
+function generationStageText(elapsedMs: number) {
+  if (elapsedMs < 4_000) return "Analyzing your request…";
+  if (elapsedMs < 10_000) return "Designing layout and widgets…";
+  if (elapsedMs < 20_000) return "Preparing data model and formulas…";
+  return "Finalizing dashboard…";
+}
+
 export default function HomePage() {
   const navigate = useNavigate();
   const setSpec = useDashboardStore((s) => s.setSpec);
   const [prompt, setPrompt] = useState("Build an executive sales dashboard with pipeline by stage, regional performance, top reps, and a planning KPI.");
   const [sourceType, setSourceType] = useState<"demo" | "salesforce">("demo");
+  const [elapsedMs, setElapsedMs] = useState(0);
 
   const nlGenerateEnabled = useMemo(() => {
     const v = String(import.meta.env.VITE_FEATURE_NL_GENERATE ?? "true").toLowerCase();
@@ -29,6 +37,24 @@ export default function HomePage() {
       navigate(`/edit/${encodeURIComponent(res.dashboardId)}?token=${encodeURIComponent(res.shareToken)}`);
     },
   });
+
+  useEffect(() => {
+    if (!mutation.isPending) {
+      setElapsedMs(0);
+      return;
+    }
+
+    const startedAt = Date.now();
+    setElapsedMs(0);
+    const timer = window.setInterval(() => {
+      setElapsedMs(Date.now() - startedAt);
+    }, 200);
+
+    return () => window.clearInterval(timer);
+  }, [mutation.isPending]);
+
+  const stageText = useMemo(() => generationStageText(elapsedMs), [elapsedMs]);
+  const elapsedSeconds = Math.floor(elapsedMs / 1000);
 
   return (
     <div className="appShell">
@@ -123,6 +149,27 @@ export default function HomePage() {
           {mutation.isError && <div className="muted">Error: {(mutation.error as Error).message}</div>}
         </div>
       </div>
+
+      {mutation.isPending && (
+        <div className="genOverlay" role="status" aria-live="polite" aria-busy="true" aria-label="Generating dashboard">
+          <div className="genOverlayCard">
+            <div className="genPulse" aria-hidden="true" />
+            <div className="genOverlayTitle">Generating your dashboard</div>
+            <div className="genOverlayStage">{stageText}</div>
+            <div className="genProgressRail" aria-hidden="true">
+              <div className="genProgressBar" />
+            </div>
+            <div className="muted" style={{ fontSize: 12 }}>
+              Elapsed {elapsedSeconds}s
+            </div>
+            {elapsedMs >= 45_000 && (
+              <div className="muted" style={{ fontSize: 12 }}>
+                Still working, this can take up to a minute…
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
