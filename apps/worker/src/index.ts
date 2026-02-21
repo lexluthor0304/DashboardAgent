@@ -545,7 +545,7 @@ app.post("/api/generate-dashboard", async (c) => {
 
   spec = normalizeScenarioSpec(dashboardId, body.prompt, body.source, plan, body.constraints?.maxWidgets);
 
-  if (remainingBudgetMs() >= 7000) {
+  if (modelUsed !== "template" && remainingBudgetMs() >= 7000) {
     try {
       const specRes = await generateSpecFromPlanFast({
         env: c.env,
@@ -562,6 +562,8 @@ app.post("/api/generate-dashboard", async (c) => {
     } catch {
       fallbackReason = fallbackReason ?? "spec_generation_failed_template_used";
     }
+  } else if (modelUsed === "template") {
+    fallbackReason = fallbackReason ?? "spec_generation_skipped_no_model_plan";
   } else {
     fallbackReason = fallbackReason ?? "spec_generation_skipped_latency_budget";
   }
@@ -668,25 +670,41 @@ async function runModelJsonOneShot<T>(args: {
   env: Env;
   system: string;
   user: string;
+  schemaName: string;
   parser: (value: unknown) => T;
   timeoutMs: number;
 }) {
-  const { env, system, user, parser, timeoutMs } = args;
-  const modelUsed = env.PRIMARY_MODEL_ID || "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b";
+  const { env, system, user, schemaName, parser, timeoutMs } = args;
+  const primaryModelId = env.PRIMARY_MODEL_ID || "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b";
+  const fallbackModelId = env.FALLBACK_MODEL_ID || "@cf/qwen/qwq-32b";
   const maxTokens = Number(env.MAX_OUTPUT_TOKENS || "1200");
   const messages = [
     { role: "system", content: system },
     { role: "user", content: user },
   ];
-  const raw = await runWorkersAiJson(env, modelUsed, messages, maxTokens, timeoutMs);
-  const jsonText = extractJsonObjectText(raw);
-  const parsed = JSON.parse(jsonText);
-  return {
-    value: parser(parsed),
-    modelUsed,
-    fallbackReason: undefined as string | undefined,
-    repairAttempts: 0,
-  };
+
+  async function attempt(modelId: string) {
+    const raw = await runWorkersAiJson(env, modelId, messages, maxTokens, timeoutMs);
+    const jsonText = extractJsonObjectText(raw);
+    const parsed = JSON.parse(jsonText);
+    return parser(parsed);
+  }
+
+  try {
+    return {
+      value: await attempt(primaryModelId),
+      modelUsed: primaryModelId,
+      fallbackReason: undefined as string | undefined,
+      repairAttempts: 0,
+    };
+  } catch {
+    return {
+      value: await attempt(fallbackModelId),
+      modelUsed: fallbackModelId,
+      fallbackReason: `${schemaName}_primary_failed`,
+      repairAttempts: 0,
+    };
+  }
 }
 
 async function runModelJsonWithRepair<T>(args: {
@@ -828,6 +846,7 @@ async function generatePlanFromPromptFast(args: {
     env,
     system,
     user,
+    schemaName: "generation_plan",
     timeoutMs,
     parser: (value) => GenerationPlanSchema.parse(value),
   });
@@ -903,6 +922,7 @@ async function generateSpecFromPlanFast(args: {
     env,
     system,
     user,
+    schemaName: "generation_spec",
     timeoutMs,
     parser: (value) => DashboardSpecSchema.parse(value),
   });
