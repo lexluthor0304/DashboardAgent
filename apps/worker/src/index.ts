@@ -15,6 +15,8 @@ type Env = {
   SF_CLIENT_ID?: string;
   SF_CLIENT_SECRET?: string;
   SF_LOGIN_URL?: string; // https://login.salesforce.com or https://test.salesforce.com
+  SF_LOGIN_URL_SANDBOX?: string;
+  SF_LOGIN_URL_PRODUCTION?: string;
   SF_REDIRECT_URI?: string;
   ENCRYPTION_KEY?: string; // base64 32 bytes for AES-GCM
 };
@@ -194,6 +196,7 @@ const GenerateDashboardResponseSchema = z.object({
 const SalesforceStartRequestSchema = z.object({
   dashboardId: z.string().min(1),
   token: z.string().min(1),
+  environment: z.enum(["sandbox", "production"]).default("sandbox"),
 });
 
 const SalesforceStartResponseSchema = z.object({
@@ -214,6 +217,33 @@ const SalesforceStatusResponseSchema = z.object({
   error: z.string().optional(),
 });
 
+const SalesforceConnectorSummarySchema = z.object({
+  id: z.string(),
+  environment: z.enum(["sandbox", "production"]),
+  status: z.enum(["pending", "connected", "error", "revoked"]),
+  instanceUrl: z.string().url().optional(),
+  orgId: z.string().optional(),
+  userId: z.string().optional(),
+  updatedAt: z.number().int().positive(),
+});
+
+const SalesforceConnectorListResponseSchema = z.object({
+  connectors: z.array(SalesforceConnectorSummarySchema),
+  activeConnectorId: z.string().optional(),
+});
+
+const SalesforceActivateRequestSchema = z.object({
+  dashboardId: z.string().min(1),
+  token: z.string().min(1),
+  connectorId: z.string().min(1),
+});
+
+const SalesforceActivateResponseSchema = z.object({
+  ok: z.literal(true),
+  activeConnectorId: z.string(),
+  activeEnvironment: z.enum(["sandbox", "production"]),
+});
+
 const SalesforceQueryRequestSchema = z.object({
   dashboardId: z.string().min(1),
   token: z.string().min(1),
@@ -226,9 +256,13 @@ const SalesforceQueryResponseSchema = z.object({
   totalSize: z.number().int().nonnegative(),
   done: z.boolean(),
   nextRecordsUrl: z.string().optional(),
+  connectorId: z.string().optional(),
+  environment: z.enum(["sandbox", "production"]).optional(),
+  requestId: z.string().optional(),
 });
 
 type SfConnectorStatus = "pending" | "connected" | "error" | "revoked";
+type SfEnvironment = "sandbox" | "production";
 
 type SfConnectorRow = {
   id: string;
@@ -243,6 +277,13 @@ type SfConnectorRow = {
   token_expires_at: number | null;
   scopes: string | null;
   created_at: number;
+  updated_at: number;
+};
+
+type SfActiveEnvRow = {
+  dashboard_id: string;
+  active_connector_id: string;
+  active_environment: SfEnvironment;
   updated_at: number;
 };
 
@@ -268,8 +309,11 @@ function ttlDaysToMs(days: number) {
 
 const SALESFORCE_API_VERSION = "v62.0";
 
-function loginHost(env: Env) {
-  const raw = (env.SF_LOGIN_URL || "https://test.salesforce.com").trim();
+function loginHostForEnvironment(env: Env, environment: SfEnvironment) {
+  const raw =
+    environment === "production"
+      ? (env.SF_LOGIN_URL_PRODUCTION || "https://login.salesforce.com").trim()
+      : (env.SF_LOGIN_URL_SANDBOX || env.SF_LOGIN_URL || "https://test.salesforce.com").trim();
   return raw.replace(/\/+$/, "");
 }
 
@@ -355,6 +399,19 @@ function buildOpportunitySoqlFromRequest(requestQuery: unknown) {
     "ORDER BY CloseDate DESC",
     `LIMIT ${maxRows}`,
   ].join(" ");
+}
+
+function soqlPreview(soql: string) {
+  return soql.replace(/\s+/g, " ").trim().slice(0, 200);
+}
+
+async function dbResolveActiveSfConnector(env: Env, dashboardId: string): Promise<SfConnectorRow | null> {
+  const active = await dbGetActiveSfEnvRow(env, dashboardId);
+  if (!active) return null;
+  const connector = await dbGetSfConnectorById(env, active.active_connector_id);
+  if (!connector) return null;
+  if (connector.dashboard_id !== dashboardId) return null;
+  return connector;
 }
 
 function defaultDemoSpec(dashboardId: string): DashboardSpec {
@@ -707,6 +764,77 @@ async function dbGetLatestSfConnectorByDashboard(env: Env, dashboardId: string):
   return row ?? null;
 }
 
+async function dbListSfConnectorsByDashboard(env: Env, dashboardId: string): Promise<SfConnectorRow[]> {
+  const result = await env.DB.prepare(
+    "SELECT id, dashboard_id, environment, status, instance_url, org_id, user_id, refresh_token_enc, access_token_enc, token_expires_at, scopes, created_at, updated_at " +
+      "FROM sf_connectors WHERE dashboard_id = ? ORDER BY updated_at DESC",
+  )
+    .bind(dashboardId)
+    .all<SfConnectorRow>();
+  return (result.results ?? []) as SfConnectorRow[];
+}
+
+async function dbGetActiveSfEnvRow(env: Env, dashboardId: string): Promise<SfActiveEnvRow | null> {
+  const row = await env.DB.prepare(
+    "SELECT dashboard_id, active_connector_id, active_environment, updated_at FROM dashboard_sf_active_env WHERE dashboard_id = ? LIMIT 1",
+  )
+    .bind(dashboardId)
+    .first<SfActiveEnvRow>();
+  return row ?? null;
+}
+
+async function dbSetActiveSfConnector(env: Env, args: { dashboardId: string; connectorId: string; environment: SfEnvironment }) {
+  const ts = nowEpochMs();
+  await env.DB.prepare(
+    "INSERT INTO dashboard_sf_active_env(dashboard_id, active_connector_id, active_environment, updated_at) VALUES(?, ?, ?, ?) " +
+      "ON CONFLICT(dashboard_id) DO UPDATE SET active_connector_id = excluded.active_connector_id, active_environment = excluded.active_environment, updated_at = excluded.updated_at",
+  )
+    .bind(args.dashboardId, args.connectorId, args.environment, ts)
+    .run();
+}
+
+async function dbInsertSfQueryAuditLog(
+  env: Env,
+  args: {
+    id: string;
+    dashboardId: string;
+    connectorId?: string | null;
+    environment?: SfEnvironment | null;
+    orgId?: string | null;
+    userId?: string | null;
+    requestId: string;
+    soqlHash?: string | null;
+    soqlPreview?: string | null;
+    rowCount?: number | null;
+    durationMs?: number | null;
+    status: "success" | "blocked" | "upstream_error";
+    errorCode?: string | null;
+  },
+) {
+  await env.DB.prepare(
+    "INSERT INTO sf_query_audit_logs(" +
+      "id, dashboard_id, connector_id, environment, org_id, user_id, request_id, soql_hash, soql_preview, row_count, duration_ms, status, error_code, created_at" +
+      ") VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  )
+    .bind(
+      args.id,
+      args.dashboardId,
+      args.connectorId ?? null,
+      args.environment ?? null,
+      args.orgId ?? null,
+      args.userId ?? null,
+      args.requestId,
+      args.soqlHash ?? null,
+      args.soqlPreview ?? null,
+      args.rowCount ?? null,
+      args.durationMs ?? null,
+      args.status,
+      args.errorCode ?? null,
+      nowEpochMs(),
+    )
+    .run();
+}
+
 async function dbInsertOauthState(
   env: Env,
   args: { state: string; dashboardId: string; connectorId: string; expiresAt: number },
@@ -741,8 +869,8 @@ function extractTokenFromRequest(req: Request, fallback?: string): string | null
   return null;
 }
 
-async function salesforceTokenRequest(env: Env, form: URLSearchParams) {
-  const res = await fetch(`${loginHost(env)}/services/oauth2/token`, {
+async function salesforceTokenRequest(env: Env, environment: SfEnvironment, form: URLSearchParams) {
+  const res = await fetch(`${loginHostForEnvironment(env, environment)}/services/oauth2/token`, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: form.toString(),
@@ -755,7 +883,7 @@ async function salesforceTokenRequest(env: Env, form: URLSearchParams) {
   return json;
 }
 
-async function exchangeAuthCodeForTokens(env: Env, code: string) {
+async function exchangeAuthCodeForTokens(env: Env, environment: SfEnvironment, code: string) {
   requireSfConfig(env);
   const form = new URLSearchParams();
   form.set("grant_type", "authorization_code");
@@ -763,7 +891,7 @@ async function exchangeAuthCodeForTokens(env: Env, code: string) {
   form.set("client_secret", env.SF_CLIENT_SECRET!);
   form.set("redirect_uri", env.SF_REDIRECT_URI!);
   form.set("code", code);
-  return salesforceTokenRequest(env, form);
+  return salesforceTokenRequest(env, environment, form);
 }
 
 async function refreshSfAccessToken(env: Env, connector: SfConnectorRow) {
@@ -775,7 +903,7 @@ async function refreshSfAccessToken(env: Env, connector: SfConnectorRow) {
   form.set("client_id", env.SF_CLIENT_ID!);
   form.set("client_secret", env.SF_CLIENT_SECRET!);
   form.set("refresh_token", refreshToken);
-  const refreshed = await salesforceTokenRequest(env, form);
+  const refreshed = await salesforceTokenRequest(env, connector.environment, form);
   const accessToken = String(refreshed.access_token ?? "");
   if (!accessToken) throw new Error("salesforce_access_token_missing");
   const accessTokenEnc = await encryptSecret(env, accessToken);
@@ -860,10 +988,10 @@ function toDashboardRowsFromSf(records: unknown[]) {
   });
 }
 
-app.get("/api/health", (c) => c.json({ ok: true, ts: nowEpochMs() }));
-
-app.post("/api/connectors/salesforce/sandbox/start", async (c) => {
-  const body = SalesforceStartRequestSchema.parse(await c.req.json());
+async function startSalesforceConnector(
+  c: { env: Env; req: { raw: Request }; json: (body: unknown, status?: number) => Response },
+  body: z.infer<typeof SalesforceStartRequestSchema>,
+) {
   const token = extractTokenFromRequest(c.req.raw, body.token);
   if (!token) return c.json({ error: "missing token" }, 401);
   try {
@@ -885,12 +1013,12 @@ app.post("/api/connectors/salesforce/sandbox/start", async (c) => {
   await dbUpsertSfConnector(c.env, {
     id: connectorId,
     dashboardId: body.dashboardId,
-    environment: "sandbox",
+    environment: body.environment,
     status: "pending",
   });
   await dbInsertOauthState(c.env, { state, dashboardId: body.dashboardId, connectorId, expiresAt });
 
-  const authUrl = new URL(`${loginHost(c.env)}/services/oauth2/authorize`);
+  const authUrl = new URL(`${loginHostForEnvironment(c.env, body.environment)}/services/oauth2/authorize`);
   authUrl.searchParams.set("response_type", "code");
   authUrl.searchParams.set("client_id", c.env.SF_CLIENT_ID!);
   authUrl.searchParams.set("redirect_uri", c.env.SF_REDIRECT_URI!);
@@ -904,6 +1032,108 @@ app.post("/api/connectors/salesforce/sandbox/start", async (c) => {
     expiresAt,
   });
   return c.json(resp);
+}
+
+async function executeConnectorSoqlWithAudit(args: {
+  env: Env;
+  dashboardId: string;
+  connector: SfConnectorRow;
+  rawSoql: string;
+  maxRows: number;
+  requestId: string;
+}) {
+  const { env, dashboardId, connector, rawSoql, maxRows, requestId } = args;
+  const startedAt = nowEpochMs();
+  const preview = soqlPreview(rawSoql);
+  const previewHash = await sha256Hex(rawSoql);
+
+  let guardedSoql = "";
+  try {
+    guardedSoql = sanitizeSoqlSelect(rawSoql, maxRows);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "invalid_soql";
+    await dbInsertSfQueryAuditLog(env, {
+      id: randomId("audit"),
+      dashboardId,
+      connectorId: connector.id,
+      environment: connector.environment,
+      orgId: connector.org_id,
+      userId: connector.user_id,
+      requestId,
+      soqlHash: previewHash,
+      soqlPreview: preview,
+      status: "blocked",
+      errorCode: msg,
+      durationMs: Math.max(0, nowEpochMs() - startedAt),
+    });
+    return {
+      status: 400 as const,
+      body: { error: msg, requestId },
+    };
+  }
+
+  try {
+    const data = await runSalesforceSoql(env, connector, guardedSoql);
+    const records = Array.isArray((data as any).records) ? ((data as any).records as unknown[]) : [];
+    const rows = toDashboardRowsFromSf(records);
+    await dbInsertSfQueryAuditLog(env, {
+      id: randomId("audit"),
+      dashboardId,
+      connectorId: connector.id,
+      environment: connector.environment,
+      orgId: connector.org_id,
+      userId: connector.user_id,
+      requestId,
+      soqlHash: await sha256Hex(guardedSoql),
+      soqlPreview: soqlPreview(guardedSoql),
+      rowCount: rows.length,
+      durationMs: Math.max(0, nowEpochMs() - startedAt),
+      status: "success",
+    });
+    const body = SalesforceQueryResponseSchema.parse({
+      rows,
+      totalSize: Number((data as any).totalSize ?? rows.length),
+      done: Boolean((data as any).done ?? true),
+      nextRecordsUrl: typeof (data as any).nextRecordsUrl === "string" ? (data as any).nextRecordsUrl : undefined,
+      connectorId: connector.id,
+      environment: connector.environment,
+      requestId,
+    });
+    return { status: 200 as const, body };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "salesforce_query_failed";
+    await dbInsertSfQueryAuditLog(env, {
+      id: randomId("audit"),
+      dashboardId,
+      connectorId: connector.id,
+      environment: connector.environment,
+      orgId: connector.org_id,
+      userId: connector.user_id,
+      requestId,
+      soqlHash: await sha256Hex(guardedSoql || rawSoql),
+      soqlPreview: soqlPreview(guardedSoql || rawSoql),
+      durationMs: Math.max(0, nowEpochMs() - startedAt),
+      status: "upstream_error",
+      errorCode: msg,
+    });
+    return {
+      status: 502 as const,
+      body: { error: msg, requestId },
+    };
+  }
+}
+
+app.get("/api/health", (c) => c.json({ ok: true, ts: nowEpochMs() }));
+
+app.post("/api/connectors/salesforce/start", async (c) => {
+  const body = SalesforceStartRequestSchema.parse(await c.req.json());
+  return startSalesforceConnector(c, body);
+});
+
+app.post("/api/connectors/salesforce/sandbox/start", async (c) => {
+  const raw = (await c.req.json()) as Record<string, unknown>;
+  const body = SalesforceStartRequestSchema.parse({ ...raw, environment: "sandbox" });
+  return startSalesforceConnector(c, body);
 });
 
 app.get("/api/connectors/salesforce/callback", async (c) => {
@@ -928,7 +1158,7 @@ app.get("/api/connectors/salesforce/callback", async (c) => {
   if (!connector) return c.html("<html><body><h3>Connector not found</h3></body></html>", 404);
 
   try {
-    const tokens = await exchangeAuthCodeForTokens(c.env, code);
+    const tokens = await exchangeAuthCodeForTokens(c.env, connector.environment, code);
     const accessToken = String(tokens.access_token ?? "");
     const refreshTokenRaw = typeof tokens.refresh_token === "string" ? tokens.refresh_token : null;
     const instanceUrl = typeof tokens.instance_url === "string" ? tokens.instance_url : connector.instance_url;
@@ -944,7 +1174,7 @@ app.get("/api/connectors/salesforce/callback", async (c) => {
     await dbUpsertSfConnector(c.env, {
       id: connector.id,
       dashboardId: connector.dashboard_id,
-      environment: "sandbox",
+      environment: connector.environment,
       status: "connected",
       instanceUrl,
       orgId: ids.orgId,
@@ -954,8 +1184,13 @@ app.get("/api/connectors/salesforce/callback", async (c) => {
       tokenExpiresAt: nowEpochMs() + 55 * 60 * 1000,
       scopes,
     });
+    await dbSetActiveSfConnector(c.env, {
+      dashboardId: connector.dashboard_id,
+      connectorId: connector.id,
+      environment: connector.environment,
+    });
     return c.html(
-      "<html><body><h3>Salesforce Sandbox connected.</h3><p>You can return to the dashboard editor.</p><script>setTimeout(()=>window.close(),900);</script></body></html>",
+      `<html><body><h3>Salesforce ${connector.environment} connected.</h3><p>You can return to the dashboard editor.</p><script>setTimeout(()=>window.close(),900);</script></body></html>`,
       200,
     );
   } catch (e) {
@@ -963,7 +1198,7 @@ app.get("/api/connectors/salesforce/callback", async (c) => {
     await dbUpsertSfConnector(c.env, {
       id: connector.id,
       dashboardId: connector.dashboard_id,
-      environment: "sandbox",
+      environment: connector.environment,
       status: "error",
       instanceUrl: connector.instance_url,
       orgId: connector.org_id,
@@ -984,7 +1219,8 @@ app.get("/api/connectors/salesforce/status", async (c) => {
   if (!dashboardId) return c.json({ error: "missing dashboardId" }, 400);
   if (!token) return c.json({ error: "missing token" }, 401);
   if (!(await dbVerifyShareToken(c.env, dashboardId, token))) return c.json({ error: "invalid token" }, 403);
-  const connector = await dbGetLatestSfConnectorByDashboard(c.env, dashboardId);
+  const active = await dbResolveActiveSfConnector(c.env, dashboardId);
+  const connector = active ?? (await dbGetLatestSfConnectorByDashboard(c.env, dashboardId));
   if (!connector) {
     const resp = SalesforceStatusResponseSchema.parse({ connected: false });
     return c.json(resp);
@@ -1002,6 +1238,51 @@ app.get("/api/connectors/salesforce/status", async (c) => {
   return c.json(resp);
 });
 
+app.get("/api/connectors/salesforce/list", async (c) => {
+  const url = new URL(c.req.url);
+  const dashboardId = url.searchParams.get("dashboardId") ?? "";
+  const token = extractTokenFromRequest(c.req.raw, url.searchParams.get("token") ?? undefined);
+  if (!dashboardId) return c.json({ error: "missing dashboardId" }, 400);
+  if (!token) return c.json({ error: "missing token" }, 401);
+  if (!(await dbVerifyShareToken(c.env, dashboardId, token))) return c.json({ error: "invalid token" }, 403);
+  const connectors = await dbListSfConnectorsByDashboard(c.env, dashboardId);
+  const active = await dbGetActiveSfEnvRow(c.env, dashboardId);
+  const resp = SalesforceConnectorListResponseSchema.parse({
+    connectors: connectors.map((conn) => ({
+      id: conn.id,
+      environment: conn.environment,
+      status: conn.status,
+      instanceUrl: conn.instance_url ?? undefined,
+      orgId: conn.org_id ?? undefined,
+      userId: conn.user_id ?? undefined,
+      updatedAt: conn.updated_at,
+    })),
+    activeConnectorId: active?.active_connector_id ?? undefined,
+  });
+  return c.json(resp);
+});
+
+app.post("/api/connectors/salesforce/activate", async (c) => {
+  const body = SalesforceActivateRequestSchema.parse(await c.req.json());
+  const token = extractTokenFromRequest(c.req.raw, body.token);
+  if (!token) return c.json({ error: "missing token" }, 401);
+  if (!(await dbVerifyShareToken(c.env, body.dashboardId, token))) return c.json({ error: "invalid token" }, 403);
+  const connector = await dbGetSfConnectorById(c.env, body.connectorId);
+  if (!connector || connector.dashboard_id !== body.dashboardId) return c.json({ error: "connector_not_found" }, 404);
+  if (connector.status !== "connected") return c.json({ error: "connector_not_connected" }, 409);
+  await dbSetActiveSfConnector(c.env, {
+    dashboardId: body.dashboardId,
+    connectorId: connector.id,
+    environment: connector.environment,
+  });
+  const resp = SalesforceActivateResponseSchema.parse({
+    ok: true,
+    activeConnectorId: connector.id,
+    activeEnvironment: connector.environment,
+  });
+  return c.json(resp);
+});
+
 app.post("/api/connectors/:connectorId/query", async (c) => {
   const connectorId = c.req.param("connectorId");
   const body = SalesforceQueryRequestSchema.parse(await c.req.json());
@@ -1011,30 +1292,38 @@ app.post("/api/connectors/:connectorId/query", async (c) => {
   const connector = await dbGetSfConnectorById(c.env, connectorId);
   if (!connector || connector.dashboard_id !== body.dashboardId) return c.json({ error: "connector_not_found" }, 404);
   if (connector.status !== "connected") return c.json({ error: "connector_not_connected" }, 409);
+  const requestId = randomId("req");
+  const result = await executeConnectorSoqlWithAudit({
+    env: c.env,
+    dashboardId: body.dashboardId,
+    connector,
+    rawSoql: body.soql,
+    maxRows: Math.min(5000, body.maxRows ?? 2000),
+    requestId,
+  });
+  return c.json(result.body, result.status);
+});
 
-  let guardedSoql = "";
-  try {
-    guardedSoql = sanitizeSoqlSelect(body.soql, Math.min(5000, body.maxRows ?? 2000));
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : "invalid_soql";
-    return c.json({ error: msg }, 400);
-  }
+app.post("/api/connectors/salesforce/query-active", async (c) => {
+  const body = SalesforceQueryRequestSchema.parse(await c.req.json());
+  const token = extractTokenFromRequest(c.req.raw, body.token);
+  if (!token) return c.json({ error: "missing token" }, 401);
+  if (!(await dbVerifyShareToken(c.env, body.dashboardId, token))) return c.json({ error: "invalid token" }, 403);
 
-  try {
-    const data = await runSalesforceSoql(c.env, connector, guardedSoql);
-    const records = Array.isArray((data as any).records) ? ((data as any).records as unknown[]) : [];
-    const rows = toDashboardRowsFromSf(records);
-    const resp = SalesforceQueryResponseSchema.parse({
-      rows,
-      totalSize: Number((data as any).totalSize ?? rows.length),
-      done: Boolean((data as any).done ?? true),
-      nextRecordsUrl: typeof (data as any).nextRecordsUrl === "string" ? (data as any).nextRecordsUrl : undefined,
-    });
-    return c.json(resp);
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : "salesforce_query_failed";
-    return c.json({ error: msg }, 502);
+  const connector = await dbResolveActiveSfConnector(c.env, body.dashboardId);
+  if (!connector || connector.status !== "connected") {
+    return c.json({ error: "salesforce_active_connector_missing", action: "connect_or_activate" }, 409);
   }
+  const requestId = randomId("req");
+  const result = await executeConnectorSoqlWithAudit({
+    env: c.env,
+    dashboardId: body.dashboardId,
+    connector,
+    rawSoql: body.soql,
+    maxRows: Math.min(5000, body.maxRows ?? 2000),
+    requestId,
+  });
+  return c.json(result.body, result.status);
 });
 
 app.post("/api/generate-dashboard", async (c) => {
@@ -1637,27 +1926,34 @@ app.get("/api/dashboards/:id/data", async (c) => {
   }
 
   if (req.kind === "salesforce_soql_guarded") {
-    const connector = await dbGetLatestSfConnectorByDashboard(c.env, dashboardId);
+    const connector = await dbResolveActiveSfConnector(c.env, dashboardId);
     if (!connector || connector.status !== "connected") {
-      return c.json({ error: "salesforce_connector_missing", action: "connect_sandbox" }, 409);
+      return c.json({ error: "salesforce_connector_missing", action: "connect_or_activate" }, 409);
     }
-    try {
-      const soqlRaw = buildOpportunitySoqlFromRequest(req.query);
-      const maxRows = Math.min(5000, Math.max(1, Number((req.query as any)?.limit ?? 2000) || 2000));
-      const soql = sanitizeSoqlSelect(soqlRaw, maxRows);
-      const data = await runSalesforceSoql(c.env, connector, soql);
-      const records = Array.isArray((data as any).records) ? ((data as any).records as unknown[]) : [];
-      const rows = toDashboardRowsFromSf(records);
-      return c.json({
-        rows,
-        schema: { fields: Object.keys(rows[0] ?? {}) },
-        totalSize: Number((data as any).totalSize ?? rows.length),
-        done: Boolean((data as any).done ?? true),
-      });
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : "salesforce_query_failed";
-      return c.json({ error: msg }, 502);
-    }
+    const soqlRaw = buildOpportunitySoqlFromRequest(req.query);
+    const maxRows = Math.min(5000, Math.max(1, Number((req.query as any)?.limit ?? 2000) || 2000));
+    const requestId = randomId("req");
+    const result = await executeConnectorSoqlWithAudit({
+      env: c.env,
+      dashboardId,
+      connector,
+      rawSoql: soqlRaw,
+      maxRows,
+      requestId,
+    });
+    if (result.status !== 200) return c.json(result.body, result.status);
+    const rows = (result.body as any).rows as any[];
+    return c.json({
+      rows,
+      schema: { fields: Object.keys(rows[0] ?? {}) },
+      totalSize: (result.body as any).totalSize,
+      done: (result.body as any).done,
+      requestId,
+      dataSourceMeta: {
+        connectorId: connector.id,
+        environment: connector.environment,
+      },
+    });
   }
 
   return c.json({ error: "not implemented" }, 501);

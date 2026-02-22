@@ -1,7 +1,7 @@
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Link, useParams, useSearchParams } from "react-router-dom";
-import { getDashboard, getSalesforceConnectorStatus, startSalesforceSandboxConnect } from "../api/client";
+import { activateSalesforceConnector, getDashboard, listSalesforceConnectors, startSalesforceConnect } from "../api/client";
 import { useDashboardStore } from "../state/dashboardStore";
 import ChatPanel from "../components/ChatPanel";
 import Canvas from "../components/Canvas";
@@ -17,6 +17,7 @@ export default function EditorPage() {
   const redo = useDashboardStore((s) => s.redo);
   const canUndo = useDashboardStore((s) => s.history.length > 0);
   const canRedo = useDashboardStore((s) => s.future.length > 0);
+  const [selectedConnectorId, setSelectedConnectorId] = useState("");
 
   const q = useQuery({
     queryKey: ["dashboard", dashboardId, token],
@@ -50,30 +51,58 @@ export default function EditorPage() {
     return Object.values(effectiveSpec.dataRequests ?? {}).some((r) => r?.kind === "salesforce_soql_guarded");
   }, [effectiveSpec]);
 
-  const sfStatusQ = useQuery({
-    queryKey: ["sf-status", dashboardId, token],
+  const sfListQ = useQuery({
+    queryKey: ["sf-connectors", dashboardId, token],
     queryFn: async () => {
       if (!dashboardId) throw new Error("Missing dashboardId");
       if (!token) throw new Error("Missing token");
-      return getSalesforceConnectorStatus(dashboardId, token);
+      return listSalesforceConnectors(dashboardId, token);
     },
     enabled: Boolean(dashboardId && token && requiresSalesforce),
-    refetchInterval: (query) => (query.state.data?.status === "pending" ? 5000 : false),
+    refetchInterval: (query) => {
+      const hasPending = (query.state.data?.connectors ?? []).some((c) => c.status === "pending");
+      return hasPending ? 5000 : false;
+    },
   });
 
   const sfStart = useMutation({
-    mutationFn: async () => {
+    mutationFn: async (environment: "sandbox" | "production") => {
       if (!dashboardId) throw new Error("Missing dashboardId");
-      return startSalesforceSandboxConnect(dashboardId, token);
+      return startSalesforceConnect(dashboardId, token, environment);
     },
     onSuccess: (res) => {
       const child = window.open(res.authorizeUrl, "_blank", "noopener,noreferrer");
       if (!child) window.location.assign(res.authorizeUrl);
       window.setTimeout(() => {
-        sfStatusQ.refetch();
+        sfListQ.refetch();
       }, 1200);
     },
   });
+
+  const sfActivate = useMutation({
+    mutationFn: async (connectorId: string) => {
+      if (!dashboardId) throw new Error("Missing dashboardId");
+      return activateSalesforceConnector(dashboardId, token, connectorId);
+    },
+    onSuccess: () => {
+      sfListQ.refetch();
+    },
+  });
+
+  const connectors = sfListQ.data?.connectors ?? [];
+  const activeConnectorId = sfListQ.data?.activeConnectorId;
+  const activeConnector = connectors.find((c) => c.id === activeConnectorId);
+
+  useEffect(() => {
+    if (!requiresSalesforce) return;
+    if (connectors.length === 0) {
+      setSelectedConnectorId("");
+      return;
+    }
+    const currentExists = connectors.some((c) => c.id === selectedConnectorId);
+    if (currentExists) return;
+    setSelectedConnectorId(activeConnectorId ?? connectors[0]!.id);
+  }, [requiresSalesforce, connectors, selectedConnectorId, activeConnectorId]);
 
   if (!dashboardId) return <div className="muted">Missing dashboardId</div>;
   if (!token) return <div className="muted">Missing token. Create a dashboard from the home page.</div>;
@@ -98,25 +127,63 @@ export default function EditorPage() {
                   Salesforce:
                 </div>
                 <div style={{ fontSize: 12, fontWeight: 700 }}>
-                  {sfStatusQ.isLoading
+                  {sfListQ.isLoading
                     ? "checking…"
-                    : sfStatusQ.data?.connected
-                      ? "connected"
-                      : sfStatusQ.data?.status === "pending"
-                        ? "auth pending"
-                        : "not connected"}
+                    : activeConnector
+                      ? `${activeConnector.environment} ${activeConnector.status}`
+                      : "not connected"}
                 </div>
               </div>
-              <button className="btn" type="button" onClick={() => sfStatusQ.refetch()} disabled={sfStatusQ.isFetching}>
-                {sfStatusQ.isFetching ? "Refreshing…" : "Refresh SF status"}
+              <button className="btn" type="button" onClick={() => sfListQ.refetch()} disabled={sfListQ.isFetching}>
+                {sfListQ.isFetching ? "Refreshing…" : "Refresh SF"}
               </button>
-              <button className="btn btnPrimary" type="button" onClick={() => sfStart.mutate()} disabled={sfStart.isPending}>
+              <button className="btn btnPrimary" type="button" onClick={() => sfStart.mutate("sandbox")} disabled={sfStart.isPending}>
                 {sfStart.isPending ? "Opening…" : "Connect Sandbox"}
               </button>
-              {(sfStart.isError || sfStatusQ.isError) && (
+              <button className="btn btnPrimary" type="button" onClick={() => sfStart.mutate("production")} disabled={sfStart.isPending}>
+                {sfStart.isPending ? "Opening…" : "Connect Production"}
+              </button>
+
+              {connectors.length > 0 && (
+                <>
+                  <select
+                    value={selectedConnectorId}
+                    onChange={(e) => setSelectedConnectorId(e.target.value)}
+                    style={{
+                      border: "1px solid var(--card-border)",
+                      background: "var(--card)",
+                      color: "var(--text)",
+                      borderRadius: 10,
+                      padding: "6px 8px",
+                    }}
+                  >
+                    {connectors.map((conn) => (
+                      <option key={conn.id} value={conn.id}>
+                        {conn.environment} | {conn.status} | {(conn.orgId ?? conn.id).slice(0, 10)}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    className="btn"
+                    type="button"
+                    disabled={!selectedConnectorId || selectedConnectorId === activeConnectorId || sfActivate.isPending}
+                    onClick={() => {
+                      if (!selectedConnectorId) return;
+                      sfActivate.mutate(selectedConnectorId);
+                    }}
+                  >
+                    {sfActivate.isPending ? "Activating…" : "Activate"}
+                  </button>
+                </>
+              )}
+
+              {(sfStart.isError || sfListQ.isError || sfActivate.isError) && (
                 <div className="pill">
                   <div className="muted" style={{ fontSize: 12 }}>
-                    SF error: {(sfStart.error as Error | undefined)?.message ?? (sfStatusQ.error as Error | undefined)?.message}
+                    SF error:{" "}
+                    {(sfStart.error as Error | undefined)?.message ??
+                      (sfActivate.error as Error | undefined)?.message ??
+                      (sfListQ.error as Error | undefined)?.message}
                   </div>
                 </div>
               )}

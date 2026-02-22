@@ -134,3 +134,24 @@ export type SalesforceConnectorStatusResponse = {
   lastSyncAt?: number;
   error?: string;
 };
+
+export type SalesforceConnectorSummary = {
+  id: string;
+  environment: "sandbox" | "production";
+  status: "pending" | "connected" | "error" | "revoked";
+  instanceUrl?: string;
+  orgId?: string;
+  userId?: string;
+  updatedAt: number;
+};
+
+export type SalesforceConnectorListResponse = {
+  connectors: SalesforceConnectorSummary[];
+  activeConnectorId?: string;
+};
+
+export type SalesforceActivateResponse = {
+  ok: true;
+  activeConnectorId: string;
+  activeEnvironment: "sandbox" | "production";
+};

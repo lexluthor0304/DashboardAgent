@@ -1,9 +1,11 @@
 import type {
+  SalesforceActivateResponse,
   AgentResponse,
   CreateDashboardResponse,
   DashboardSpec,
   GenerateDashboardResponse,
   GenerationSource,
+  SalesforceConnectorListResponse,
   SalesforceConnectorStartResponse,
   SalesforceConnectorStatusResponse,
 } from "../types/spec";
@@ -68,10 +70,18 @@ export async function startSalesforceSandboxConnect(
   dashboardId: string,
   token: string,
 ): Promise<SalesforceConnectorStartResponse> {
-  return fetchJson<SalesforceConnectorStartResponse>("/api/connectors/salesforce/sandbox/start", {
+  return startSalesforceConnect(dashboardId, token, "sandbox");
+}
+
+export async function startSalesforceConnect(
+  dashboardId: string,
+  token: string,
+  environment: "sandbox" | "production",
+): Promise<SalesforceConnectorStartResponse> {
+  return fetchJson<SalesforceConnectorStartResponse>("/api/connectors/salesforce/start", {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ dashboardId, token }),
+    body: JSON.stringify({ dashboardId, token, environment }),
   });
 }
 
@@ -82,5 +92,24 @@ export async function getSalesforceConnectorStatus(
   const qs = new URLSearchParams({ dashboardId });
   return fetchJson<SalesforceConnectorStatusResponse>(`/api/connectors/salesforce/status?${qs.toString()}`, {
     headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function listSalesforceConnectors(dashboardId: string, token: string): Promise<SalesforceConnectorListResponse> {
+  const qs = new URLSearchParams({ dashboardId });
+  return fetchJson<SalesforceConnectorListResponse>(`/api/connectors/salesforce/list?${qs.toString()}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function activateSalesforceConnector(
+  dashboardId: string,
+  token: string,
+  connectorId: string,
+): Promise<SalesforceActivateResponse> {
+  return fetchJson<SalesforceActivateResponse>("/api/connectors/salesforce/activate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ dashboardId, token, connectorId }),
   });
 }

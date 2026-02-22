@@ -13,6 +13,8 @@ MAX_OUTPUT_TOKENS = "1200"
 REPAIR_MAX_ATTEMPTS = "2"
 SHARE_TOKEN_TTL_DAYS = "7"
 SF_LOGIN_URL = "https://test.salesforce.com"
+SF_LOGIN_URL_SANDBOX = "https://test.salesforce.com"
+SF_LOGIN_URL_PRODUCTION = "https://login.salesforce.com"
 
 # D1 binding (fill database_id after `wrangler d1 create`)
 [[d1_databases]]
